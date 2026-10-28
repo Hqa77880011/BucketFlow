@@ -129,9 +129,12 @@ class GradientReducer:
             if not self.cuda:
                 communications.append(
                     {
+                        "bucket": index,
                         "bytes": self.buffers[index].numel()
                         * self.buffers[index].element_size(),
                         "duration_s": time.perf_counter() - started,
+                        "launch_s": started - self.start,
+                        "finish_s": time.perf_counter() - self.start,
                     }
                 )
         if self.cuda:
@@ -142,8 +145,11 @@ class GradientReducer:
             compute_time = self.origin.elapsed_time(compute_end) / 1000
             communications = [
                 {
+                    "bucket": i,
                     "bytes": self.buffers[i].numel() * self.buffers[i].element_size(),
                     "duration_s": events[0].elapsed_time(events[1]) / 1000,
+                    "launch_s": self.origin.elapsed_time(events[0]) / 1000,
+                    "finish_s": self.origin.elapsed_time(events[1]) / 1000,
                 }
                 for i, _, _, events in self.jobs
             ]

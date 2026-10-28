@@ -12,9 +12,12 @@ from .io import configure, device, csv_write, json_write, plot
 from .data import prepare, tensors, network
 from .planner import Controller, VARIANTS
 from .runtime import GradientReducer
+from .metrics import communication_metrics, summarize
 
 
 def train(config):
+    if not 0 <= config.get("warmup", 0) < config["steps"]:
+        raise ValueError("Require 0 <= warmup < steps")
     variant = config["variant"]
     if variant not in VARIANTS:
         raise ValueError(f"Unknown variant: {variant}")
@@ -81,7 +84,9 @@ def train(config):
             "buckets": len(controller.buckets) if reducer else None,
         }
         if reducer:
+            old_layout = [list(bucket) for bucket in controller.buckets]
             controller.observe(readiness, compute, communications, iteration)
+            row.update(communication_metrics(communications, readiness, reducer.layout, compute))
             control_start = time.perf_counter()
             if rank == 0 and (step + 1) % config["reconfigure_every"] == 0:
                 controller.adapt(iteration)
@@ -97,6 +102,7 @@ def train(config):
                 )
                 controller.predict_order = ordered[0]
             row["controller_us"] = (time.perf_counter() - control_start) * 1e6
+            row["reconfigurations_per_100"] = 100 * int(old_layout != controller.buckets)
             traces.append(
                 {
                     "step": step + 1,
@@ -146,12 +152,15 @@ def train(config):
                 "variant": variant,
                 "world_size": world,
                 "mean_iteration_s": float(
-                    np.mean([row["iteration_s"] for row in history])
+                    np.mean([row["iteration_s"] for row in history[config.get("warmup", 0):]])
                 ),
                 "p99_iteration_s": float(
-                    np.quantile([row["iteration_s"] for row in history], 0.99)
+                    np.quantile([row["iteration_s"] for row in history[config.get("warmup", 0):]], 0.99)
                 ),
                 "final_loss": history[-1]["loss"],
+                "measurement": "cuda_events" if target.type == "cuda" else "host_observed",
+                "warmup": config.get("warmup", 0),
+                "summary": summarize(history[config.get("warmup", 0):]),
             },
         )
     if world > 1:
@@ -233,7 +242,7 @@ def evaluate(config):
 
 
 def main():
-    command, config = configure(["prepare", "train", "evaluate", "compare", "plot"])
+    command, config = configure(["prepare", "train", "evaluate", "compare", "summarize", "plot"])
     if command == "prepare":
         prepare(config)
     elif command == "train":
@@ -242,6 +251,10 @@ def main():
         evaluate(config)
     elif command == "compare":
         replay(config)
+    elif command == "summarize":
+        records = [json.loads(line) for line in Path(config["trace"]).read_text(encoding="utf-8").splitlines() if line.strip()]
+        from .metrics import paired_summary
+        json_write(Path(config["output"]) / "summary.json", paired_summary(records))
     else:
         root = Path(config["output"])
         path = (

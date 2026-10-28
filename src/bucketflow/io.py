@@ -22,6 +22,8 @@ def configure(commands):
     parser.add_argument("--set", action="append", default=[])
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    config.setdefault("warmup", 0)
+    config.setdefault("readiness_ema", 0.35)
     for key, value in vars(args).items():
         if key not in ["config", "command", "set"] and value is not None:
             config[key] = value

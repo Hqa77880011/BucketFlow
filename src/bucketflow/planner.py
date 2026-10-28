@@ -10,6 +10,8 @@ VARIANTS = [
     "no_merge",
     "no_priority",
     "no_stability",
+    "no_prediction",
+    "no_network",
 ]
 
 
@@ -85,7 +87,7 @@ class Controller:
         self.sizes = list(sizes)
         self.config = config
         self.buckets = partition(sizes, config["bucket_bytes"])
-        self.readiness = np.linspace(0, 0.01, len(sizes))
+        self.readiness = np.zeros(len(sizes)) if config["variant"] == "no_prediction" else np.linspace(0, 0.01, len(sizes))
         self.windows = [deque(maxlen=20) for _ in sizes]
         self.alpha = config["startup_s"]
         self.bandwidth = config["bandwidth_bytes_s"]
@@ -109,6 +111,9 @@ class Controller:
 
     def observe(self, readiness, compute, communications, iteration):
         for i, value in enumerate(readiness):
+            if self.config["variant"] == "no_prediction":
+                self.readiness[i] = 0.0
+                continue
             recent = np.asarray(self.windows[i])
             if len(recent) >= 3:
                 median = np.median(recent)
@@ -118,13 +123,15 @@ class Controller:
                         value, median - 3 * max(mad, 1e-6), median + 3 * max(mad, 1e-6)
                     )
                 )
+            rho = self.config.get("readiness_ema", 0.35)
             self.readiness[i] = (
-                value if not self.windows[i] else 0.2 * value + 0.8 * self.readiness[i]
+                value if not self.windows[i] else rho * value + (1 - rho) * self.readiness[i]
             )
             self.windows[i].append(float(readiness[i]))
         self.compute = compute
         if (
-            len(communications) >= 2
+            self.config["variant"] != "no_network"
+            and len(communications) >= 2
             and len(set(r["bytes"] for r in communications)) >= 2
         ):
             x = np.asarray([[1.0, row["bytes"]] for row in communications])
@@ -133,7 +140,7 @@ class Controller:
             if slope > 0:
                 self.alpha = 0.2 * max(0.0, alpha) + 0.8 * self.alpha
                 self.bandwidth = 0.2 / slope + 0.8 * self.bandwidth
-        elif communications:
+        elif communications and self.config["variant"] != "no_network":
             duration = sum(row["duration_s"] for row in communications)
             overhead = self.alpha * len(communications)
             if duration > overhead:
