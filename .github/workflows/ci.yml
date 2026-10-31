@@ -14,3 +14,9 @@ jobs:
       - run: pip check
       - run: python -m compileall -q src
       - run: python -m bucketflow --help
+      - name: Functional protocol check
+        env:
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+        run: python tests/smoke.py

@@ -83,3 +83,5 @@ The existing training, planner and data modules predate this update. This update
 | Classification quality | `cli.evaluate` | `evaluate --checkpoint ...` |
 
 Actual verification environment: Windows, Python 3.13.5, NumPy 2.1.3 (OpenBLAS wheel), PyTorch 2.7.1+cu118, torchvision 0.22.1 and matplotlib 3.10.0. The smoke workload is CPU/Gloo; full training, multi-node NCCL and the four reported cluster workload results are not verified by it.
+
+The GitHub Actions package workflow also executes `python tests/smoke.py` with one CPU thread to check behavior after installation.
