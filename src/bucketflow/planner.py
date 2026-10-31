@@ -12,6 +12,7 @@ VARIANTS = [
     "no_stability",
     "no_prediction",
     "no_network",
+    "no_queue",
 ]
 
 
@@ -29,12 +30,22 @@ def partition(sizes, maximum):
 
 
 def schedule(
-    buckets, sizes, readiness, compute_time, alpha, bandwidth, prioritize=True
+    buckets,
+    sizes,
+    readiness,
+    compute_time,
+    alpha,
+    bandwidth,
+    prioritize=True,
+    queue_delays=None,
 ):
     pending = list(range(len(buckets)))
     releases = [max(readiness[i] for i in bucket) for bucket in buckets]
     durations = [
-        alpha + sum(sizes[i] for i in bucket) / bandwidth for bucket in buckets
+        alpha
+        + sum(sizes[i] for i in bucket) / bandwidth
+        + (queue_delays[index] if queue_delays is not None else 0.0)
+        for index, bucket in enumerate(buckets)
     ]
     now = 0.0
     records = []
@@ -82,12 +93,46 @@ def schedule(
     }
 
 
+class QueueDelayRegressor:
+    """Online nonnegative conditional-mean regression for log2 message classes.
+
+    Explicit queue_s observations are preferred. Otherwise the target is the
+    positive observed-service residual above the current alpha/bandwidth model.
+    Only observations from completed previous iterations enter predictions.
+    """
+
+    def __init__(self, momentum=0.8):
+        self.momentum = momentum
+        self.means = {}
+
+    @staticmethod
+    def message_class(size):
+        return int(np.floor(np.log2(max(int(size), 1))))
+
+    def predict(self, size):
+        return self.means.get(self.message_class(size), 0.0)
+
+    def observe(self, size, queue_s):
+        if not np.isfinite(queue_s) or queue_s < 0:
+            raise ValueError("Observed queue delay must be finite and nonnegative")
+        key = self.message_class(size)
+        self.means[key] = (
+            self.momentum * self.means[key] + (1 - self.momentum) * float(queue_s)
+            if key in self.means
+            else float(queue_s)
+        )
+
+
 class Controller:
     def __init__(self, sizes, config):
         self.sizes = list(sizes)
         self.config = config
         self.buckets = partition(sizes, config["bucket_bytes"])
-        self.readiness = np.zeros(len(sizes)) if config["variant"] == "no_prediction" else np.linspace(0, 0.01, len(sizes))
+        self.readiness = (
+            np.zeros(len(sizes))
+            if config["variant"] == "no_prediction"
+            else np.linspace(0, 0.01, len(sizes))
+        )
         self.windows = [deque(maxlen=20) for _ in sizes]
         self.alpha = config["startup_s"]
         self.bandwidth = config["bandwidth_bytes_s"]
@@ -97,6 +142,7 @@ class Controller:
         self.previous = None
         self.watch = 0
         self.compute = 0.01
+        self.queue = QueueDelayRegressor(config.get("queue_momentum", 0.8))
 
     def predict(self, buckets=None):
         return schedule(
@@ -107,6 +153,12 @@ class Controller:
             self.alpha,
             self.bandwidth,
             self.config["variant"] != "no_priority",
+            [
+                self.queue.predict(sum(self.sizes[i] for i in bucket))
+                for bucket in (buckets or self.buckets)
+            ]
+            if self.config["variant"] not in ("no_network", "no_queue")
+            else None,
         )
 
     def observe(self, readiness, compute, communications, iteration):
@@ -125,7 +177,9 @@ class Controller:
                 )
             rho = self.config.get("readiness_ema", 0.35)
             self.readiness[i] = (
-                value if not self.windows[i] else rho * value + (1 - rho) * self.readiness[i]
+                value
+                if not self.windows[i]
+                else rho * value + (1 - rho) * self.readiness[i]
             )
             self.windows[i].append(float(readiness[i]))
         self.compute = compute
@@ -148,6 +202,13 @@ class Controller:
                     duration - overhead
                 )
                 self.bandwidth = 0.2 * value + 0.8 * self.bandwidth
+        if self.config["variant"] not in ("no_network", "no_queue"):
+            for row in communications:
+                baseline = self.alpha + row["bytes"] / self.bandwidth
+                self.queue.observe(
+                    row["bytes"],
+                    row.get("queue_s", max(0.0, row["duration_s"] - baseline)),
+                )
         self.bandwidth_window.append(self.bandwidth)
         if self.watch:
             self.watch -= 1
